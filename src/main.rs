@@ -4,6 +4,7 @@ use std::process::exit;
 
 use bytesize::ByteSize;
 use colored::*;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use structopt::StructOpt;
 use walkdir::WalkDir;
@@ -46,6 +47,12 @@ pub struct NewUploadResponse {
     url: String,
 }
 
+#[derive(Deserialize, Debug)]
+pub struct NewUploadError {
+    status: String,
+    reason: String,
+}
+
 fn begin_upload(
     host: &str,
     api_token: &str,
@@ -79,6 +86,15 @@ fn begin_upload(
         return Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::Other,
             "Invalid API key",
+        )));
+    }
+
+    if response.status() == 400 {
+        let json: NewUploadError = response.json()?;
+
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            json.reason,
         )));
     }
 
@@ -140,6 +156,11 @@ fn finalize_file(
 }
 
 fn main() {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build_global()
+        .unwrap();
+
     let opt = Opt::from_args();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut directories: Vec<PathBuf> = Vec::new();
@@ -178,7 +199,7 @@ fn main() {
         &opt.tags.bold()
     );
 
-    for file_path in files.into_iter() {
+    files.into_par_iter().for_each(|file_path| {
         match begin_upload(&host, &api_key, &file_path)
             .and_then(|response| match upload_file(&file_path, &response.url) {
                 Ok(_) => Ok(response),
@@ -196,12 +217,15 @@ fn main() {
                 finalize_file(&request, &host, &api_key)
             }) {
             Ok(response) => {
-                println!("Done: {}", response.url);
+                println!(
+                    "[{}] Uploaded: {}",
+                    &file_path.to_str().unwrap(),
+                    response.url
+                );
             }
             Err(err) => {
-                eprintln!("{}", err);
-                exit(1);
+                eprintln!("[{}] Error: {}", &file_path.to_str().unwrap(), err);
             }
         }
-    }
+    })
 }
